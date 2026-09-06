@@ -45,8 +45,21 @@ The fixed `height:900px` is a placeholder — some screens (like the results pag
 
 ## After this is live
 - **Automatic iframe resizing** — so the embedded height always matches whatever screen the person is on, no dead space or scrollbars.
-- **Supabase** — a database to actually save people's results (so you can see completed Snapshots, not just have people take it). Worth adding once the assessment itself feels done, not before.
 - **Planning Center Church Center tab** — once this is live on Squarespace, the same Vercel URL can also be added as a navigation item in Church Center, so it shows up as a tab inside Planning Center too.
+
+## Saving results with Supabase
+
+1. Create a free project at [supabase.com](https://supabase.com).
+2. Open the **SQL Editor** in your Supabase project, paste in everything from `supabase/schema.sql` in this folder, and run it. This creates the `assessment_submissions` table with Row Level Security already turned on — participants can submit a result, but the public site can never read anyone's results back, including their own.
+3. Open **Project Settings → API** and copy the **Project URL** and the **anon public** key (not the `service_role` key — that one should never appear in this app).
+4. In Vercel, go to your project → **Settings → Environment Variables** and add:
+   - `VITE_SUPABASE_URL` — the Project URL
+   - `VITE_SUPABASE_ANON_KEY` — the anon public key
+5. Redeploy (Vercel → Deployments → the three-dot menu → Redeploy) so the new variables take effect.
+
+Once that's done, every completed assessment saves automatically — no further setup needed. If saving ever fails (bad connection, Supabase briefly down), the participant sees a short message but can still continue to their Trellis; nothing blocks them from finishing.
+
+To see saved results: open your Supabase project → **Table Editor → assessment_submissions**. There's intentionally no in-app admin view yet — RLS keeps the public site from reading data back, so viewing results happens in the Supabase dashboard itself, while logged in as the project owner.
 
 ## Making changes later
 Whenever you want something changed, tell Claude what to update, get the new `App.jsx`, and re-upload it to the same GitHub repo (or ask Claude to walk you through connecting git properly so updates sync automatically). Vercel redeploys on its own within a minute or two of the GitHub repo changing.
