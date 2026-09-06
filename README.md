@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/31881257/README.md)
 # The Garden — Spiritual Health Snapshot
 
 This folder is a complete, ready-to-deploy copy of the assessment. No setup needed inside it — it just needs a GitHub repo and a Vercel project pointed at that repo.
