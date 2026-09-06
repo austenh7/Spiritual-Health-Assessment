@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { supabase } from "./supabaseClient.js";
 
 // Standalone-app storage shim. The original build (inside Claude.ai) used
 // window.storage, a Claude-artifact-only API. Outside that sandbox, plain
@@ -508,11 +509,21 @@ export function getTierWindow(bandLabel) {
 }
 export function getHiddenTier(window) { return TIER_ORDER.find((t) => !window.includes(t)); }
 
+export function describeResumePoint(s) {
+  if (s.stage === "quiz") {
+    const step = STEPS[s.quizStepIndex];
+    if (step && step.type === "likert") return `You were partway through the assessment — question ${step.globalNumber} of ${TOTAL_QUESTIONS}.`;
+    return "You were partway through the assessment.";
+  }
+  if (s.stage === "trellis") return "You'd already finished — here's your Trellis.";
+  return "You'd finished the assessment and were setting up your Trellis.";
+}
+
 /* ============================================================
    4. COMPONENT
    ============================================================ */
 
-const POST_ORDER = ["snapshot", "choose-focus", "formation", "choose-practice", "add-trellis", "resources", "community", "followup", "future-self", "trellis"];
+const POST_ORDER = ["snapshot", "choose-focus", "formation", "choose-practice", "add-trellis", "resources", "community", "followup", "future-self", "save-results", "trellis"];
 
 export default function SpiritualHealthSnapshot() {
   const [stage, setStage] = useState("intro");
@@ -536,6 +547,16 @@ export default function SpiritualHealthSnapshot() {
   const [futureSelfNote, setFutureSelfNote] = useState("");
   const [followUp, setFollowUp] = useState({ practiceCheckInDate: null, snapshotRetakeDate: null });
 
+  // Supabase save-on-completion state.
+  const [submissionId, setSubmissionId] = useState(null);
+  const [resultsSaved, setResultsSaved] = useState(false);
+  const [submitStatus, setSubmitStatus] = useState("idle"); // idle | saving | error
+  const [saveError, setSaveError] = useState("");
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
+  const [email, setEmail] = useState("");
+  const [pendingResume, setPendingResume] = useState(null);
+
   const loadedRef = useRef(false);
   const chartRef = useRef(null);
 
@@ -545,17 +566,32 @@ export default function SpiritualHealthSnapshot() {
         const result = await storage.get(STORAGE_KEY);
         if (result && result.value) {
           const s = JSON.parse(result.value);
-          if (s && s.stage) {
-            setStage(s.stage); setQuizStepIndex(s.quizStepIndex || 0); setAnswers(s.answers || {});
-            setChosenFocus(s.chosenFocus || null); setFormationAnswer(s.formationAnswer || null);
-            setChosenPractice(s.chosenPractice || null); setCustomPractice(s.customPractice || "");
-            setIntention(s.intention || ""); setCadence(s.cadence || ""); setCommunityPerson(s.communityPerson || "");
-            setFutureSelfNote(s.futureSelfNote || ""); setFollowUp(s.followUp || { practiceCheckInDate: null, snapshotRetakeDate: null });
+          if (s && s.stage && s.stage !== "intro") {
+            // Don't jump straight back in — let the person choose Continue vs Start Fresh.
+            setPendingResume(s);
           }
         }
       } catch (e) {} finally { loadedRef.current = true; }
     })();
   }, []);
+
+  function resumeSession() {
+    const s = pendingResume;
+    if (!s) return;
+    setStage(s.stage); setQuizStepIndex(s.quizStepIndex || 0); setAnswers(s.answers || {});
+    setChosenFocus(s.chosenFocus || null); setFormationAnswer(s.formationAnswer || null);
+    setChosenPractice(s.chosenPractice || null); setCustomPractice(s.customPractice || "");
+    setIntention(s.intention || ""); setCadence(s.cadence || ""); setCommunityPerson(s.communityPerson || "");
+    setFutureSelfNote(s.futureSelfNote || ""); setFollowUp(s.followUp || { practiceCheckInDate: null, snapshotRetakeDate: null });
+    setSubmissionId(s.submissionId || null); setResultsSaved(!!s.resultsSaved);
+    setFirstName(s.firstName || ""); setLastName(s.lastName || ""); setEmail(s.email || "");
+    setPendingResume(null);
+  }
+
+  async function startFreshFromResume() {
+    setPendingResume(null);
+    try { await storage.delete(STORAGE_KEY); } catch (e) {}
+  }
 
   useEffect(() => {
     if (!loadedRef.current || stage === "intro") return;
@@ -564,10 +600,11 @@ export default function SpiritualHealthSnapshot() {
         await storage.set(STORAGE_KEY, JSON.stringify({
           stage, quizStepIndex, answers, chosenFocus, formationAnswer, chosenPractice, customPractice,
           intention, cadence, communityPerson, futureSelfNote, followUp,
+          submissionId, resultsSaved, firstName, lastName, email,
         }));
       } catch (e) {}
     })();
-  }, [stage, quizStepIndex, answers, chosenFocus, formationAnswer, chosenPractice, customPractice, intention, cadence, communityPerson, futureSelfNote, followUp]);
+  }, [stage, quizStepIndex, answers, chosenFocus, formationAnswer, chosenPractice, customPractice, intention, cadence, communityPerson, futureSelfNote, followUp, submissionId, resultsSaved, firstName, lastName, email]);
 
   useEffect(() => {
     if (stage !== "quiz") return;
@@ -600,10 +637,52 @@ export default function SpiritualHealthSnapshot() {
     setChosenPractice(null); setCustomPractice(""); setShowCustomPractice(false);
     setIntention(""); setCadence(""); setCommunityPerson(""); setFutureSelfNote("");
     setFollowUp({ practiceCheckInDate: null, snapshotRetakeDate: null });
+    setSubmissionId(null); setResultsSaved(false); setSubmitStatus("idle"); setSaveError("");
+    setFirstName(""); setLastName(""); setEmail("");
     try { await storage.delete(STORAGE_KEY); } catch (e) {}
   }
   function formatDate(iso) { return iso ? new Date(iso).toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" }) : ""; }
   function goFormation() { setFormationAnswer(null); setStage("formation"); }
+  function proceedToSaveResults() {
+    if (!submissionId) setSubmissionId(crypto.randomUUID());
+    setStage("save-results");
+  }
+  async function saveResultsToSupabase() {
+    if (resultsSaved) return; // already saved this session — never insert twice
+    setSubmitStatus("saving");
+    setSaveError("");
+    if (!supabase) {
+      setSubmitStatus("error");
+      setSaveError("Saving isn't connected yet.");
+      return;
+    }
+    const payload = {
+      submission_id: submissionId,
+      first_name: firstName.trim() || null,
+      last_name: lastName.trim() || null,
+      email: email.trim() || null,
+      christ_score: dimScores.christ, word_score: dimScores.word, community_score: dimScores.community,
+      feasting_score: dimScores.feasting, fasting_score: dimScores.fasting,
+      rest_score: dimScores.rest, work_score: dimScores.work,
+      worship_score: dimScores.worship, justice_score: dimScores.justice,
+      prayer_score: dimScores.prayer, service_score: dimScores.service,
+      contentment_score: dimScores.contentment, generosity_score: dimScores.generosity,
+      shade_score: dimScores.shade, fruit_score: dimScores.fruit,
+      dimension_statuses: Object.fromEntries(DIMENSION_ORDER.map((d) => [d, getLabelForScore(dimScores[d])])),
+      reflection_areas: selfSelectedDims.map((d) => DIMENSIONS[d].label),
+      chosen_focus: chosenFocus ? DIMENSIONS[chosenFocus].label : null,
+      chosen_practice_title: chosenPractice ? chosenPractice.title : null,
+      chosen_practice_description: chosenPractice ? chosenPractice.description || null : null,
+    };
+    const { error } = await supabase.from("assessment_submissions").insert([payload]);
+    if (error) {
+      setSubmitStatus("error");
+      setSaveError("Your results didn't save — you can try again, or continue without saving.");
+    } else {
+      setResultsSaved(true);
+      setSubmitStatus("idle");
+    }
+  }
   function goAddTrellis() {
     setIntention(chosenPractice && chosenPractice.description ? chosenPractice.description : "");
     setCadence(chosenPractice && chosenPractice.tier ? TIER_META[chosenPractice.tier].cadence : "");
@@ -640,6 +719,33 @@ export default function SpiritualHealthSnapshot() {
         @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,wght@0,500;0,600;1,600&family=EB+Garamond:wght@400;500&family=Inter:wght@400;500;600&display=swap');
         .snap-app { --font-title:'Fraunces',Georgia,serif; --font-subtitle:'EB Garamond',Georgia,serif; --font-body:'Inter',-apple-system,sans-serif; font-family:var(--font-body); color:${COLORS.ink}; background:var(--dyn-bg,${COLORS.cream}); min-height:100vh; display:flex; flex-direction:column; align-items:center; padding:48px 22px 90px; box-sizing:border-box; transition:background .2s ease; }
         .snap-app * { box-sizing:border-box; }
+
+        /* --- Cross-browser button reset (iOS Safari, in-app/Church Center webviews) ---
+           iOS Safari applies its own default tap/focus chrome to button elements —
+           a blue tap-highlight overlay and sometimes a blue focus ring — that ignores
+           whatever background/border a class defines. Resetting the bare button
+           element first, then letting each specific class (.scale-target, .choice-row,
+           .option-card, .snap-btn) define its own explicit colors, removes that
+           regardless of which browser or embedded webview is rendering it. */
+        button {
+          appearance: none;
+          -webkit-appearance: none;
+          -moz-appearance: none;
+          background: transparent;
+          border: none;
+          margin: 0;
+          font: inherit;
+          color: inherit;
+          outline: none;
+          -webkit-tap-highlight-color: transparent;
+        }
+        button:focus { outline: none; }
+        button:active { outline: none; }
+        /* Accessible keyboard-navigation focus ring — Garden Green, never browser blue. */
+        button:focus-visible {
+          outline: 2px solid ${COLORS.green};
+          outline-offset: 2px;
+        }
         /* Intro: vertically centered on desktop within most of the viewport, natural
            top-down flow preserved on mobile. Reading width stays governed by .snap-card. */
         @media (min-width:768px){ .snap-app.snap-app--intro { justify-content:center; } }
@@ -648,11 +754,11 @@ export default function SpiritualHealthSnapshot() {
         h1.snap-title { font-family:var(--font-title); font-weight:600; letter-spacing:-.01em; font-size:clamp(24px,4.6vw,34px); line-height:1.3; margin:0 0 18px; }
         h2.snap-h2 { font-family:var(--font-title); font-weight:600; font-size:clamp(19px,3vw,22px); line-height:1.35; margin:0 0 8px; }
         p.snap-body { font-family:var(--font-body); font-size:16px; line-height:1.65; margin:0 0 16px; }
-        button.snap-btn { font-family:var(--font-body); font-size:14px; letter-spacing:.04em; padding:13px 28px; border-radius:999px; border:1px solid currentColor; background:transparent; color:inherit; cursor:pointer; }
+        button.snap-btn { font-family:var(--font-body); font-size:14px; letter-spacing:.04em; padding:13px 28px; border-radius:999px; border:1px solid var(--dyn-text, ${COLORS.ink}); background:transparent; color:var(--dyn-text, ${COLORS.ink}); -webkit-text-fill-color:var(--dyn-text, ${COLORS.ink}); -webkit-tap-highlight-color:transparent; cursor:pointer; }
         button.snap-btn.primary.on-cream { background:${COLORS.ink}; } button.snap-btn.primary.on-cream span { color:${COLORS.cream}; }
         button.snap-btn:disabled { opacity:.35; cursor:not-allowed; }
         .btn-row { display:flex; gap:12px; margin-top:28px; flex-wrap:wrap; }
-        .back-link { font-family:var(--font-body); font-size:13px; color:inherit; opacity:.65; background:none; border:none; padding:0; cursor:pointer; margin-bottom:18px; }
+        .back-link { font-family:var(--font-body); font-size:13px; color:var(--dyn-text, ${COLORS.ink}); -webkit-text-fill-color:var(--dyn-text, ${COLORS.ink}); opacity:.65; background:none; border:none; padding:0; cursor:pointer; margin-bottom:18px; -webkit-tap-highlight-color:transparent; }
         .back-link:disabled { opacity:.25; cursor:default; }
         .progress-track { width:100%; height:4px; background:rgba(0,0,0,.15); border-radius:2px; margin-bottom:6px; }
         .progress-track.on-dark { background:rgba(255,255,255,.22); }
@@ -661,18 +767,19 @@ export default function SpiritualHealthSnapshot() {
         .progress-sub { font-family:var(--font-subtitle); font-size:11px; opacity:.55; margin-bottom:26px; }
         .q-block { animation:fadeIn .25s ease; } @keyframes fadeIn { from{opacity:0;transform:translateY(4px);} to{opacity:1;transform:translateY(0);} }
         .scale-row { display:flex; align-items:center; justify-content:space-between; gap:clamp(6px,2vw,14px); margin:40px 0 10px; }
-        .scale-target { flex:1; max-width:56px; aspect-ratio:1; border-radius:50%; border:1.5px solid currentColor; background:transparent; cursor:pointer; transition:background .2s ease,transform .15s ease; }
+        .scale-target { flex:1; max-width:56px; aspect-ratio:1; border-radius:50%; border:1.5px solid ${COLORS.cream}; background:transparent; cursor:pointer; -webkit-tap-highlight-color:transparent; touch-action:manipulation; transition:background .2s ease,transform .15s ease; }
+        .scale-target:focus-visible { outline:2px solid ${COLORS.yellow}; outline-offset:3px; }
         .scale-target:hover:not(:disabled) { transform:translateY(-1px); } .scale-target:active:not(:disabled) { transform:scale(.95); }
-        .scale-target.selected { background:currentColor; } .scale-target:disabled { cursor:default; }
+        .scale-target.selected { background:${COLORS.cream}; border-color:${COLORS.cream}; } .scale-target:disabled { cursor:default; }
         /* Roots (dark cocoa) screens only: solid Warm Cream circles with a visible number,
            per revision request. Rhythms/Reach keep the plain neutral outline dot unchanged. */
-        .scale-target.filled { background:${COLORS.cream}; border-color:transparent; color:${COLORS.cocoa}; font-family:var(--font-body); font-weight:600; font-size:clamp(18px,4.2vw,22px); display:flex; align-items:center; justify-content:center; }
-        .scale-target.filled.selected { background:${COLORS.cocoa}; color:${COLORS.cream}; transform:scale(1.08); box-shadow:0 4px 14px rgba(0,0,0,.25); }
+        .scale-target.filled { background:${COLORS.cream}; border-color:transparent; color:${COLORS.cocoa}; -webkit-text-fill-color:${COLORS.cocoa}; font-family:var(--font-body); font-weight:600; font-size:clamp(18px,4.2vw,22px); display:flex; align-items:center; justify-content:center; }
+        .scale-target.filled.selected { background:${COLORS.cocoa}; color:${COLORS.cream}; -webkit-text-fill-color:${COLORS.cream}; transform:scale(1.08); box-shadow:0 4px 14px rgba(0,0,0,.25); }
         .scale-endpoints { display:flex; justify-content:space-between; font-family:var(--font-subtitle); font-size:13px; opacity:.75; margin-bottom:4px; }
         .choice-list { display:flex; flex-direction:column; gap:10px; margin:22px 0 12px; }
-        .choice-row { text-align:left; font-family:var(--font-body); font-size:15px; line-height:1.5; padding:15px 18px; border-radius:14px; border:1.5px solid currentColor; background:transparent; color:inherit; cursor:pointer; opacity:.85; transition:opacity .2s ease,background .2s ease,transform .15s ease; }
+        .choice-row { text-align:left; font-family:var(--font-body); font-size:15px; line-height:1.5; padding:15px 18px; border-radius:14px; border:1.5px solid ${COLORS.ink}; background:transparent; color:${COLORS.ink}; -webkit-text-fill-color:${COLORS.ink}; -webkit-tap-highlight-color:transparent; cursor:pointer; opacity:.85; transition:opacity .2s ease,background .2s ease,transform .15s ease; }
         .choice-row:hover:not(:disabled) { opacity:1; } .choice-row:active:not(:disabled) { transform:scale(.99); }
-        .choice-row.selected { background:currentColor; opacity:1; } .choice-row.selected span { color:var(--dyn-bg,${COLORS.cream}); }
+        .choice-row.selected { background:${COLORS.ink}; border-color:${COLORS.ink}; opacity:1; } .choice-row.selected span { color:${COLORS.cream}; -webkit-text-fill-color:${COLORS.cream}; }
         textarea.snap-textarea { width:100%; font-family:var(--font-body); font-size:16px; line-height:1.55; padding:14px 16px; border:1px solid rgba(38,53,42,.4); border-radius:14px; background:${COLORS.cream}; color:${COLORS.ink}; min-height:100px; resize:vertical; margin:18px 0 4px; }
         textarea.snap-textarea:focus { outline:none; border-color:${COLORS.ink}; }
         input.snap-input { width:100%; font-family:var(--font-body); font-size:16px; padding:13px 16px; border:1px solid rgba(38,53,42,.4); border-radius:999px; background:${COLORS.cream}; color:${COLORS.ink}; margin:12px 0 4px; }
@@ -705,20 +812,29 @@ export default function SpiritualHealthSnapshot() {
         .legend-line { font-family:var(--font-subtitle); font-size:11.5px; opacity:.6; text-align:center; margin:4px 0 20px; }
         .bar-section { margin-top:34px; } .bar-section-label { font-family:var(--font-subtitle); font-size:13px; letter-spacing:.1em; text-transform:uppercase; color:${COLORS.green}; margin-bottom:14px; }
         .bar-pair-label { font-family:var(--font-subtitle); font-size:11.5px; letter-spacing:.08em; text-transform:uppercase; opacity:.5; margin:14px 0 6px; }
-        /* Diverging pair visualization: two independent scores sharing one center origin.
-           Center = Needs Cultivation for both sides; each edge = Flourishing for its own side. */
-        .diverge-row { margin-bottom:22px; }
-        .diverge-labels { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px; gap:8px; }
-        .diverge-label { display:flex; flex-direction:column; font-family:var(--font-body); font-size:14px; }
-        .diverge-label.right { text-align:right; }
+        /* Diverging pair visualization: one shared line per rhythm pair. The center
+           marks Needs Cultivation; each side grows independently toward its own
+           Flourishing at its own outer edge. No axes, ticks, numbers, or legend —
+           just the line and the two end labels. */
+        .diverge-row { margin-bottom:24px; }
+        .diverge-line { display:grid; grid-template-columns:auto 1fr auto; grid-template-areas:"left track right"; align-items:center; gap:12px; }
+        .diverge-end { display:flex; flex-direction:column; font-family:var(--font-body); font-size:13.5px; line-height:1.25; max-width:92px; }
+        .diverge-end.left { grid-area:left; text-align:left; }
+        .diverge-end.right { grid-area:right; text-align:right; }
         .diverge-name { font-weight:500; }
-        .diverge-band { font-family:var(--font-subtitle); font-size:11.5px; opacity:.6; }
-        .diverge-track { position:relative; height:8px; border-radius:999px; background:rgba(38,53,42,.08); }
+        .diverge-band { font-family:var(--font-subtitle); font-size:10.5px; opacity:.6; }
+        .diverge-track { grid-area:track; position:relative; height:8px; border-radius:999px; background:rgba(38,53,42,.08); min-width:48px; }
         .diverge-center { position:absolute; left:50%; top:-3px; bottom:-3px; width:2px; background:rgba(38,53,42,.2); transform:translateX(-1px); }
         .diverge-fill { position:absolute; top:0; height:100%; transition:width .4s ease; }
         .diverge-fill.left { right:50%; border-radius:999px 0 0 999px; }
         .diverge-fill.right { left:50%; border-radius:0 999px 999px 0; }
-        @media (max-width:480px){ .diverge-name{font-size:13px;} .diverge-band{font-size:10.5px;} }
+        /* Mobile fallback, only if the shared line gets too tight: labels move to
+           their own row above, still flanking left/right — the paired bar itself
+           never reverts to two separate stacked bars. */
+        @media (max-width:400px){
+          .diverge-line { grid-template-columns:1fr 1fr; grid-template-areas:"left right" "track track"; row-gap:6px; }
+          .diverge-end { max-width:none; }
+        }
         .bar-row { margin-bottom:16px; }
         .bar-top { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:5px; font-family:var(--font-body); font-size:14.5px; }
         .bar-band { font-family:var(--font-subtitle); font-size:12px; opacity:.65; }
@@ -729,7 +845,19 @@ export default function SpiritualHealthSnapshot() {
       `}</style>
 
       <div className="snap-card">
-        {stage === "intro" && (
+        {stage === "intro" && pendingResume && (
+          <>
+            <div className="eyebrow">The Garden</div>
+            <h1 className="snap-title">Welcome back</h1>
+            <p className="snap-body">{describeResumePoint(pendingResume)}</p>
+            <div className="btn-row">
+              <button className="snap-btn primary on-cream" onClick={resumeSession}><span>Continue Where I Left Off</span></button>
+              <button className="snap-btn" onClick={startFreshFromResume}><span>Start Fresh</span></button>
+            </div>
+          </>
+        )}
+
+        {stage === "intro" && !pendingResume && (
           <>
             <div className="eyebrow">The Garden</div>
             <h1 className="snap-title">Your Spiritual Health Snapshot</h1>
@@ -847,9 +975,6 @@ export default function SpiritualHealthSnapshot() {
             {["roots", "rhythms", "reach"].map((sectionId) => (
               <div className="bar-section" key={sectionId}>
                 <div className="bar-section-label">{SECTION_META[sectionId].label}</div>
-                {sectionId === "rhythms" && (
-                  <div className="callout-def" style={{ marginTop: -4 }}>Each pair shares one line — the center marks Needs Cultivation, and each side reaches toward Flourishing on its own. They aren't opposite ends of the same score; someone can be strong in both, low in both, or anywhere between.</div>
-                )}
                 {sectionId === "rhythms"
                   ? PAIR_ORDER.map((pairId) => (
                       (() => {
@@ -859,14 +984,20 @@ export default function SpiritualHealthSnapshot() {
                         return (
                           <div className="diverge-row" key={pairId}>
                             <div className="bar-pair-label">{PAIR_META[pairId].label}</div>
-                            <div className="diverge-labels">
-                              <div className="diverge-label left"><span className="diverge-name">{DIMENSIONS[leftId].label}</span><span className="diverge-band">{getLabelForScore(dimScores[leftId])}</span></div>
-                              <div className="diverge-label right"><span className="diverge-name">{DIMENSIONS[rightId].label}</span><span className="diverge-band">{getLabelForScore(dimScores[rightId])}</span></div>
-                            </div>
-                            <div className="diverge-track">
-                              <div className="diverge-center" />
-                              <div className="diverge-fill left" style={{ width: `${leftPct / 2}%`, background: SECTION_BAR_COLOR.rhythms }} />
-                              <div className="diverge-fill right" style={{ width: `${rightPct / 2}%`, background: SECTION_BAR_COLOR.rhythms }} />
+                            <div className="diverge-line">
+                              <div className="diverge-end left">
+                                <span className="diverge-name">{DIMENSIONS[leftId].label}</span>
+                                <span className="diverge-band">{getLabelForScore(dimScores[leftId])}</span>
+                              </div>
+                              <div className="diverge-track">
+                                <div className="diverge-center" />
+                                <div className="diverge-fill left" style={{ width: `${leftPct / 2}%`, background: SECTION_BAR_COLOR.rhythms }} />
+                                <div className="diverge-fill right" style={{ width: `${rightPct / 2}%`, background: SECTION_BAR_COLOR.rhythms }} />
+                              </div>
+                              <div className="diverge-end right">
+                                <span className="diverge-name">{DIMENSIONS[rightId].label}</span>
+                                <span className="diverge-band">{getLabelForScore(dimScores[rightId])}</span>
+                              </div>
                             </div>
                           </div>
                         );
@@ -1055,7 +1186,36 @@ export default function SpiritualHealthSnapshot() {
             <h1 className="snap-title">What do you want to remember about this season?</h1>
             <p className="snap-body" style={{ opacity: 0.75 }}>We'll show this back to you at your next Snapshot.</p>
             <textarea className="snap-textarea" style={{ minHeight: 130 }} value={futureSelfNote} onChange={(e) => setFutureSelfNote(e.target.value)} placeholder="I want to remember…" />
-            <div className="btn-row"><button className="snap-btn primary on-cream" onClick={() => setStage("trellis")}><span>Finish</span></button></div>
+            <div className="btn-row"><button className="snap-btn primary on-cream" onClick={proceedToSaveResults}><span>Finish</span></button></div>
+          </>
+        )}
+
+        {stage === "save-results" && (
+          <>
+            <button className="back-link" onClick={goBackPost}>← Back</button>
+            <div className="eyebrow">Save Your Results</div>
+            <h1 className="snap-title">Want to save a copy of this Snapshot?</h1>
+
+            {!resultsSaved && (
+              <>
+                <p className="snap-body">Your results can be saved so you and The Garden's ministry leaders can refer back to them later.</p>
+                <p className="snap-body" style={{ opacity: 0.7 }}>Prefer not to save them? You can continue without storing your results.</p>
+                <input className="snap-input" placeholder="First name" value={firstName} onChange={(e) => setFirstName(e.target.value)} />
+                <input className="snap-input" placeholder="Last name" value={lastName} onChange={(e) => setLastName(e.target.value)} />
+                <input className="snap-input" type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} />
+                {submitStatus === "error" && <p className="snap-body" style={{ opacity: 0.85 }}>{saveError}</p>}
+                <div className="btn-row">
+                  <button className="snap-btn primary on-cream" disabled={submitStatus === "saving"} onClick={saveResultsToSupabase}><span>{submitStatus === "saving" ? "Saving…" : "Save My Results"}</span></button>
+                  <button className="snap-btn" disabled={submitStatus === "saving"} onClick={() => setStage("trellis")}><span>Continue Without Saving</span></button>
+                </div>
+              </>
+            )}
+            {resultsSaved && (
+              <>
+                <p className="snap-body">Saved.</p>
+                <div className="btn-row"><button className="snap-btn primary on-cream" onClick={() => setStage("trellis")}><span>Continue</span></button></div>
+              </>
+            )}
           </>
         )}
 
