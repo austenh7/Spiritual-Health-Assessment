@@ -426,8 +426,8 @@ function buildSteps() {
   steps.push({ type: "text", id: "reflection2", prompt: "Where do you currently feel most stuck, stretched, or spiritually dry?" });
   steps.push({
     type: "multi-select-text", id: "reflection3",
-    prompt: "As you think about your life right now, where do you sense Jesus inviting you to pay more attention?",
-    helper: "Choose up to three. You don't need to be certain.",
+    prompt: "Where might Jesus be inviting your attention?",
+    helper: "Based on your responses, these are a few areas that may deserve some attention in this season. Choose one or two that you sense Jesus inviting you to lean into.",
     options: REFLECTION3_OPTIONS, textLabel: "Want to say more? (optional)",
   });
   return steps;
@@ -526,6 +526,7 @@ export default function SpiritualHealthSnapshot() {
   const [exploreAll, setExploreAll] = useState(false);
   const [formationAnswer, setFormationAnswer] = useState(null);
   const [showHiddenTier, setShowHiddenTier] = useState(false);
+  const [showAllReflectionAreas, setShowAllReflectionAreas] = useState(false);
   const [chosenPractice, setChosenPractice] = useState(null);
   const [customPractice, setCustomPractice] = useState("");
   const [showCustomPractice, setShowCustomPractice] = useState(false);
@@ -588,7 +589,7 @@ export default function SpiritualHealthSnapshot() {
     setSelectDraft((prev) => {
       if (prev.includes(label)) return prev.filter((l) => l !== label);
       const w = prev.filter((l) => l !== NOT_SURE_LABEL);
-      return w.length >= 3 ? w : [...w, label];
+      return w.length >= 2 ? w : [...w, label];
     });
   }
   function goBackQuiz() { if (!transitioning && quizStepIndex > 0) setQuizStepIndex((i) => i - 1); }
@@ -634,11 +635,14 @@ export default function SpiritualHealthSnapshot() {
   const lens = formationAnswer ? formationAnswer.lens : "cultivate";
 
   return (
-    <div className="snap-app" style={{ "--dyn-bg": bgColor, "--dyn-text": textColorOnBg }}>
+    <div className={`snap-app${stage === "intro" ? " snap-app--intro" : ""}`} style={{ "--dyn-bg": bgColor, "--dyn-text": textColorOnBg }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,wght@0,500;0,600;1,600&family=EB+Garamond:wght@400;500&family=Inter:wght@400;500;600&display=swap');
         .snap-app { --font-title:'Fraunces',Georgia,serif; --font-subtitle:'EB Garamond',Georgia,serif; --font-body:'Inter',-apple-system,sans-serif; font-family:var(--font-body); color:${COLORS.ink}; background:var(--dyn-bg,${COLORS.cream}); min-height:100vh; display:flex; flex-direction:column; align-items:center; padding:48px 22px 90px; box-sizing:border-box; transition:background .2s ease; }
         .snap-app * { box-sizing:border-box; }
+        /* Intro: vertically centered on desktop within most of the viewport, natural
+           top-down flow preserved on mobile. Reading width stays governed by .snap-card. */
+        @media (min-width:768px){ .snap-app.snap-app--intro { justify-content:center; } }
         .snap-card { width:100%; max-width:600px; color:var(--dyn-text,${COLORS.ink}); }
         .eyebrow { font-family:var(--font-subtitle); font-size:13px; letter-spacing:.14em; text-transform:uppercase; color:${COLORS.green}; margin-bottom:10px; }
         h1.snap-title { font-family:var(--font-title); font-weight:600; letter-spacing:-.01em; font-size:clamp(24px,4.6vw,34px); line-height:1.3; margin:0 0 18px; }
@@ -660,6 +664,10 @@ export default function SpiritualHealthSnapshot() {
         .scale-target { flex:1; max-width:56px; aspect-ratio:1; border-radius:50%; border:1.5px solid currentColor; background:transparent; cursor:pointer; transition:background .2s ease,transform .15s ease; }
         .scale-target:hover:not(:disabled) { transform:translateY(-1px); } .scale-target:active:not(:disabled) { transform:scale(.95); }
         .scale-target.selected { background:currentColor; } .scale-target:disabled { cursor:default; }
+        /* Roots (dark cocoa) screens only: solid Warm Cream circles with a visible number,
+           per revision request. Rhythms/Reach keep the plain neutral outline dot unchanged. */
+        .scale-target.filled { background:${COLORS.cream}; border-color:transparent; color:${COLORS.cocoa}; font-family:var(--font-body); font-weight:600; font-size:clamp(18px,4.2vw,22px); display:flex; align-items:center; justify-content:center; }
+        .scale-target.filled.selected { background:${COLORS.cocoa}; color:${COLORS.cream}; transform:scale(1.08); box-shadow:0 4px 14px rgba(0,0,0,.25); }
         .scale-endpoints { display:flex; justify-content:space-between; font-family:var(--font-subtitle); font-size:13px; opacity:.75; margin-bottom:4px; }
         .choice-list { display:flex; flex-direction:column; gap:10px; margin:22px 0 12px; }
         .choice-row { text-align:left; font-family:var(--font-body); font-size:15px; line-height:1.5; padding:15px 18px; border-radius:14px; border:1.5px solid currentColor; background:transparent; color:inherit; cursor:pointer; opacity:.85; transition:opacity .2s ease,background .2s ease,transform .15s ease; }
@@ -697,6 +705,20 @@ export default function SpiritualHealthSnapshot() {
         .legend-line { font-family:var(--font-subtitle); font-size:11.5px; opacity:.6; text-align:center; margin:4px 0 20px; }
         .bar-section { margin-top:34px; } .bar-section-label { font-family:var(--font-subtitle); font-size:13px; letter-spacing:.1em; text-transform:uppercase; color:${COLORS.green}; margin-bottom:14px; }
         .bar-pair-label { font-family:var(--font-subtitle); font-size:11.5px; letter-spacing:.08em; text-transform:uppercase; opacity:.5; margin:14px 0 6px; }
+        /* Diverging pair visualization: two independent scores sharing one center origin.
+           Center = Needs Cultivation for both sides; each edge = Flourishing for its own side. */
+        .diverge-row { margin-bottom:22px; }
+        .diverge-labels { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px; gap:8px; }
+        .diverge-label { display:flex; flex-direction:column; font-family:var(--font-body); font-size:14px; }
+        .diverge-label.right { text-align:right; }
+        .diverge-name { font-weight:500; }
+        .diverge-band { font-family:var(--font-subtitle); font-size:11.5px; opacity:.6; }
+        .diverge-track { position:relative; height:8px; border-radius:999px; background:rgba(38,53,42,.08); }
+        .diverge-center { position:absolute; left:50%; top:-3px; bottom:-3px; width:2px; background:rgba(38,53,42,.2); transform:translateX(-1px); }
+        .diverge-fill { position:absolute; top:0; height:100%; transition:width .4s ease; }
+        .diverge-fill.left { right:50%; border-radius:999px 0 0 999px; }
+        .diverge-fill.right { left:50%; border-radius:0 999px 999px 0; }
+        @media (max-width:480px){ .diverge-name{font-size:13px;} .diverge-band{font-size:10.5px;} }
         .bar-row { margin-bottom:16px; }
         .bar-top { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:5px; font-family:var(--font-body); font-size:14.5px; }
         .bar-band { font-family:var(--font-subtitle); font-size:12px; opacity:.65; }
@@ -736,7 +758,7 @@ export default function SpiritualHealthSnapshot() {
                 <div className="progress-label">Question {step.globalNumber} of {TOTAL_QUESTIONS}</div>
                 <div className="progress-sub">{sectionMeta.label.toUpperCase()} · {step.sectionPosition} of {step.sectionTotal}</div>
                 <h1 className="snap-title">{step.prompt}</h1>
-                <div className="scale-row">{[1, 2, 3, 4, 5].map((val) => (<button key={val} disabled={transitioning} className={`scale-target${answers[step.id] === val ? " selected" : ""}`} onClick={() => selectLikert(val)} aria-label={`Response ${val} of 5`} />))}</div>
+                <div className="scale-row">{[1, 2, 3, 4, 5].map((val) => (<button key={val} disabled={transitioning} className={`scale-target${step.section === "roots" ? " filled" : ""}${answers[step.id] === val ? " selected" : ""}`} onClick={() => selectLikert(val)} aria-label={`Response ${val} of 5`}>{step.section === "roots" ? val : null}</button>))}</div>
                 <div className="scale-endpoints"><span>Not yet</span><span>Flourishing</span></div>
               </>
             )}
@@ -759,18 +781,51 @@ export default function SpiritualHealthSnapshot() {
               </>
             )}
 
-            {step.type === "multi-select-text" && (
-              <>
-                <div className="progress-label">REFLECTION</div>
-                <h1 className="snap-title">{step.prompt}</h1>
-                <p className="snap-body" style={{ opacity: 0.75, marginBottom: 6 }}>{step.helper}</p>
-                <div className="counter-pill">{selectDraft.filter((l) => l !== NOT_SURE_LABEL).length} of 3 selected</div>
-                <div className="choice-list">{step.options.map((opt) => (<button key={opt.label} className={`choice-row${selectDraft.includes(opt.label) ? " selected" : ""}`} onClick={() => toggleReflection3(opt.label)}><span>{opt.label}</span></button>))}</div>
-                <div className="small-label">{step.textLabel}</div>
-                <textarea className="snap-textarea" style={{ minHeight: 70 }} value={textDraft} onChange={(e) => setTextDraft(e.target.value)} placeholder="Optional" />
-                <div className="btn-row"><button className="snap-btn primary on-cream" onClick={submitMultiSelectText} disabled={selectDraft.length === 0}><span>Continue</span></button></div>
-              </>
-            )}
+            {step.type === "multi-select-text" && (() => {
+              // All 30 answers exist by this point in the flow, so the guided
+              // suggestions can be computed live from the participant's own scores.
+              const liveDimScores = getAllDimensionScores(answers);
+              const sortedAsc = [...DIMENSION_ORDER].sort((a, b) => liveDimScores[a] - liveDimScores[b]);
+              const suggested = sortedAsc.slice(0, 4);
+              const remaining = DIMENSION_ORDER.filter((d) => !suggested.includes(d));
+              const renderAreaCard = (d) => (
+                <button key={d} className={`option-card${selectDraft.includes(DIMENSIONS[d].label) ? " selected" : ""}`} onClick={() => toggleReflection3(DIMENSIONS[d].label)}>
+                  <div className="oc-title">{DIMENSIONS[d].label}</div>
+                  <div className="oc-meta">{getLabelForScore(liveDimScores[d])}</div>
+                  <div className="oc-body">{DESCRIPTORS[d]}</div>
+                </button>
+              );
+              return (
+                <>
+                  <div className="progress-label">REFLECTION</div>
+                  <h1 className="snap-title">{step.prompt}</h1>
+                  <p className="snap-body" style={{ opacity: 0.75, marginBottom: 6 }}>{step.helper}</p>
+                  <div className="counter-pill">{selectDraft.filter((l) => l !== NOT_SURE_LABEL).length} of 2 selected</div>
+
+                  {suggested.map(renderAreaCard)}
+
+                  {!showAllReflectionAreas && (
+                    <button className="back-link" style={{ marginTop: 4 }} onClick={() => setShowAllReflectionAreas(true)}>Something else is standing out →</button>
+                  )}
+                  {showAllReflectionAreas && (
+                    <>
+                      <div className="small-label" style={{ marginTop: 16 }}>OTHER AREAS</div>
+                      {remaining.map(renderAreaCard)}
+                      <button
+                        key={NOT_SURE_LABEL}
+                        className={`choice-row${selectDraft.includes(NOT_SURE_LABEL) ? " selected" : ""}`}
+                        style={{ marginTop: 10 }}
+                        onClick={() => toggleReflection3(NOT_SURE_LABEL)}
+                      ><span>{NOT_SURE_LABEL}</span></button>
+                    </>
+                  )}
+
+                  <div className="small-label" style={{ marginTop: 20 }}>{step.textLabel}</div>
+                  <textarea className="snap-textarea" style={{ minHeight: 70 }} value={textDraft} onChange={(e) => setTextDraft(e.target.value)} placeholder="Optional" />
+                  <div className="btn-row"><button className="snap-btn primary on-cream" onClick={submitMultiSelectText} disabled={selectDraft.length === 0}><span>Continue</span></button></div>
+                </>
+              );
+            })()}
           </div>
         )}
 
@@ -792,17 +847,30 @@ export default function SpiritualHealthSnapshot() {
             {["roots", "rhythms", "reach"].map((sectionId) => (
               <div className="bar-section" key={sectionId}>
                 <div className="bar-section-label">{SECTION_META[sectionId].label}</div>
+                {sectionId === "rhythms" && (
+                  <div className="callout-def" style={{ marginTop: -4 }}>Each pair shares one line — the center marks Needs Cultivation, and each side reaches toward Flourishing on its own. They aren't opposite ends of the same score; someone can be strong in both, low in both, or anywhere between.</div>
+                )}
                 {sectionId === "rhythms"
                   ? PAIR_ORDER.map((pairId) => (
-                      <div key={pairId}>
-                        <div className="bar-pair-label">{PAIR_META[pairId].label}</div>
-                        {PAIR_META[pairId].sides.map((d) => (
-                          <div className="bar-row" key={d}>
-                            <div className="bar-top"><span>{DIMENSIONS[d].label}</span><span className="bar-band">{getLabelForScore(dimScores[d])}</span></div>
-                            <div className="bar-track"><div className="bar-fill" style={{ width: `${((dimScores[d] - 1) / 4) * 100}%`, background: SECTION_BAR_COLOR[sectionId] }}><span className="bar-dot" style={{ background: SECTION_BAR_COLOR[sectionId] }} /></div></div>
+                      (() => {
+                        const [leftId, rightId] = PAIR_META[pairId].sides;
+                        const leftPct = ((dimScores[leftId] - 1) / 4) * 100;
+                        const rightPct = ((dimScores[rightId] - 1) / 4) * 100;
+                        return (
+                          <div className="diverge-row" key={pairId}>
+                            <div className="bar-pair-label">{PAIR_META[pairId].label}</div>
+                            <div className="diverge-labels">
+                              <div className="diverge-label left"><span className="diverge-name">{DIMENSIONS[leftId].label}</span><span className="diverge-band">{getLabelForScore(dimScores[leftId])}</span></div>
+                              <div className="diverge-label right"><span className="diverge-name">{DIMENSIONS[rightId].label}</span><span className="diverge-band">{getLabelForScore(dimScores[rightId])}</span></div>
+                            </div>
+                            <div className="diverge-track">
+                              <div className="diverge-center" />
+                              <div className="diverge-fill left" style={{ width: `${leftPct / 2}%`, background: SECTION_BAR_COLOR.rhythms }} />
+                              <div className="diverge-fill right" style={{ width: `${rightPct / 2}%`, background: SECTION_BAR_COLOR.rhythms }} />
+                            </div>
                           </div>
-                        ))}
-                      </div>
+                        );
+                      })()
                     ))
                   : DIMENSION_ORDER.filter((d) => DIMENSIONS[d].section === sectionId).map((d) => (
                       <div className="bar-row" key={d}>
